@@ -1,0 +1,38 @@
+__pycache__/
+*.py[cod]
+*.log
+.env
+
+# Sessions and credentials
+sessions/
+sessions_archive/
+account_import/
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+*.session.bak
+*.item_id.txt
+
+# Runtime state
+processed_usernames.txt
+saved_target_group.txt
+country_proxies.json
+proxy_pool.json
+account_cooldowns.json
+warmer_state.json
+invite_history.json
+privacy_blacklist.txt
+channels_pool.json
+targets.txt
+bot.log
+bot.log.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

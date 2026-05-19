@@ -1,0 +1,16 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-inviter-bot
+    restart: unless-stopped
+    command: python -u main.py
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      - PYTHONIOENCODING=UTF-8
+      - TZ=UTC
+    volumes:
+      - ./:/app

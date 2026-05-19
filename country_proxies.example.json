@@ -1,0 +1,23 @@
+{
+  "us": {
+    "type": "socks5",
+    "addr": "203.0.113.10",
+    "port": 1080,
+    "user": "login_us",
+    "pass": "password_us"
+  },
+  "de": {
+    "type": "socks5",
+    "addr": "203.0.113.20",
+    "port": 1080,
+    "user": "login_de",
+    "pass": "password_de"
+  },
+  "default": {
+    "type": "socks5",
+    "addr": "203.0.113.30",
+    "port": 1080,
+    "user": "login_default",
+    "pass": "password_default"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "in": [
+    {
+      "type": "http",
+      "addr": "109.236.82.42",
+      "port": 443,
+      "user": "login_in_1",
+      "pass": "password_in_1"
+    },
+    {
+      "type": "http",
+      "addr": "109.236.82.43",
+      "port": 443,
+      "user": "login_in_2",
+      "pass": "password_in_2"
+    }
+  ],
+  "us": [
+    {
+      "type": "socks5",
+      "addr": "203.0.113.10",
+      "port": 1080,
+      "user": "login_us_1",
+      "pass": "password_us_1"
+    },
+    {
+      "type": "socks5",
+      "addr": "203.0.113.11",
+      "port": 1080,
+      "user": "login_us_2",
+      "pass": "password_us_2"
+    }
+  ],
+  "default": [
+    {
+      "type": "socks5",
+      "addr": "203.0.113.30",
+      "port": 1080,
+      "user": "login_default_1",
+      "pass": "password_default_1"
+    }
+  ]
+}

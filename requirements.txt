@@ -1,0 +1,4 @@
+aiogram>=3.4,<4.0
+telethon>=1.36,<2.0
+PySocks>=1.7.1
+python-socks[asyncio]>=2.4.4
