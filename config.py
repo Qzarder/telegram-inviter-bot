@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,9 @@ SAVED_TARGET_GROUP_FILE = BASE_DIR / "saved_target_group.txt"
 COUNTRY_PROXIES_FILE = BASE_DIR / "country_proxies.json"
 PROXY_POOL_FILE = BASE_DIR / "proxy_pool.json"
 ACCOUNT_COOLDOWNS_FILE = BASE_DIR / "account_cooldowns.json"
+DEFERRED_USERS_FILE = BASE_DIR / "deferred_usernames.json"
+SESSION_PROXY_BINDINGS_FILE = BASE_DIR / "session_proxy_bindings.json"
+ENTITY_CACHE_FILE = BASE_DIR / "entity_cache.json"
 WARMER_STATE_FILE = BASE_DIR / "warmer_state.json"
 WARMER_CHANNELS_FILE = BASE_DIR / "channels.txt"
 
@@ -79,7 +83,17 @@ INVITE_BAN_COOLDOWN_HOURS = _get_int("INVITE_BAN_COOLDOWN_HOURS", 24)
 INVITE_WARMUP_ENABLED = _get_bool("INVITE_WARMUP_ENABLED", True)
 INVITE_WARMUP_TEST_ONLY = _get_bool("INVITE_WARMUP_TEST_ONLY", False)
 INVITE_MAX_PER_SESSION = _get_int("INVITE_MAX_PER_SESSION", 3)
-INVITE_MAX_CONCURRENT = _get_int("INVITE_MAX_CONCURRENT", 2)
+INVITE_MAX_CONCURRENT = _get_int("INVITE_MAX_CONCURRENT", 1)
+INVITE_CASCADE_PAUSE_SECONDS = _get_int("INVITE_CASCADE_PAUSE_SECONDS", 60)
+INVITE_CIRCUIT_BREAKER_THRESHOLD = _get_int("INVITE_CIRCUIT_BREAKER_THRESHOLD", 2)
+INVITE_CIRCUIT_BREAKER_WINDOW_SECONDS = _get_int("INVITE_CIRCUIT_BREAKER_WINDOW_SECONDS", 600)
+INVITE_CIRCUIT_BREAKER_PAUSE_SECONDS = _get_int("INVITE_CIRCUIT_BREAKER_PAUSE_SECONDS", 3600)
+INVITE_MIN_READY_ACCOUNTS = _get_int("INVITE_MIN_READY_ACCOUNTS", 3)
+INVITE_DEFER_USER_HOURS = _get_int("INVITE_DEFER_USER_HOURS", 48)
+INVITE_USE_SEARCH_REQUEST = _get_bool("INVITE_USE_SEARCH_REQUEST", False)
+INVITE_ENTITY_CACHE_ENABLED = _get_bool("INVITE_ENTITY_CACHE_ENABLED", True)
+SESSION_PROXY_STICKY_ENABLED = _get_bool("SESSION_PROXY_STICKY_ENABLED", True)
+PROXY_MAX_ACCOUNTS_PER_IP = _get_int("PROXY_MAX_ACCOUNTS_PER_IP", 5)
 INVITE_PAUSE_BETWEEN_MIN = _get_int("INVITE_PAUSE_BETWEEN_MIN", 30)   # deprecated
 INVITE_PAUSE_BETWEEN_MAX = _get_int("INVITE_PAUSE_BETWEEN_MAX", 180)   # deprecated
 INVITE_NATURAL_READING_ENABLED = _get_bool("INVITE_NATURAL_READING_ENABLED", True)
@@ -131,10 +145,10 @@ LOLZ_API_TOKEN = _get_str("LOLZ_API_TOKEN", "")
 WARMER_PERSONAL_SCHEDULE_ENABLED = _get_bool("WARMER_PERSONAL_SCHEDULE_ENABLED", True)
 WARMER_PARALLEL_MODE = _get_bool("WARMER_PARALLEL_MODE", True)
 WARMER_PARALLEL_CONCURRENCY = _get_int("WARMER_PARALLEL_CONCURRENCY", 5)
-# Аккаунт считается уже прогретым, если он состоит в >= N каналах/группах
-# на момент первой синхронизации. Такие аккаунты сразу идут в инвайт,
-# минуя цикл warmer'а. Защита от обнуления прогресса при reimport.
+# Аккаунт с большой историей чатов у продавца помечается pre_warmed,
+# но в инвайт идёт только после proxy_warmup_done на вашем прокси.
 WARMER_PREWARMED_THRESHOLD = _get_int("WARMER_PREWARMED_THRESHOLD", 15)
+WARMER_PROXY_WARMUP_MIN_ACTIONS = _get_int("WARMER_PROXY_WARMUP_MIN_ACTIONS", 5)
 # Включает DM-обмен между своими аккаунтами в warmer-цикле.
 # DM — самый сильный trust-сигнал для Telegram. Но если перебор —
 # можно попасть в "Spam" фильтр. Дефолт = on.
@@ -143,7 +157,7 @@ WARMER_PROFILE_SETUP_ENABLED = _get_bool("WARMER_PROFILE_SETUP_ENABLED", True)
 _profile_photos_raw = _get_str("WARMER_PROFILE_PHOTOS_DIR", "profile_photos")
 WARMER_PROFILE_PHOTOS_DIR = Path(_profile_photos_raw) if Path(_profile_photos_raw).is_absolute() else BASE_DIR / _profile_photos_raw
 WARMER_PROFILE_BIO_ENABLED = _get_bool("WARMER_PROFILE_BIO_ENABLED", True)
-INVITE_VERIFY_ENABLED = _get_bool("INVITE_VERIFY_ENABLED", True)
+INVITE_VERIFY_ENABLED = _get_bool("INVITE_VERIFY_ENABLED", False)
 
 if API_ID <= 0:
     raise ValueError("API_ID должен быть положительным числом")
@@ -210,6 +224,30 @@ if INVITE_MAX_PER_SESSION <= 0:
 
 if INVITE_MAX_CONCURRENT <= 0:
     raise ValueError("INVITE_MAX_CONCURRENT должен быть больше нуля")
+
+if INVITE_CASCADE_PAUSE_SECONDS < 0:
+    raise ValueError("INVITE_CASCADE_PAUSE_SECONDS не может быть отрицательным")
+
+if INVITE_CIRCUIT_BREAKER_THRESHOLD <= 0:
+    raise ValueError("INVITE_CIRCUIT_BREAKER_THRESHOLD должен быть больше нуля")
+
+if INVITE_CIRCUIT_BREAKER_WINDOW_SECONDS <= 0:
+    raise ValueError("INVITE_CIRCUIT_BREAKER_WINDOW_SECONDS должен быть больше нуля")
+
+if INVITE_CIRCUIT_BREAKER_PAUSE_SECONDS <= 0:
+    raise ValueError("INVITE_CIRCUIT_BREAKER_PAUSE_SECONDS должен быть больше нуля")
+
+if INVITE_MIN_READY_ACCOUNTS <= 0:
+    raise ValueError("INVITE_MIN_READY_ACCOUNTS должен быть больше нуля")
+
+if INVITE_DEFER_USER_HOURS <= 0:
+    raise ValueError("INVITE_DEFER_USER_HOURS должен быть больше нуля")
+
+if WARMER_PROXY_WARMUP_MIN_ACTIONS <= 0:
+    raise ValueError("WARMER_PROXY_WARMUP_MIN_ACTIONS должен быть больше нуля")
+
+if PROXY_MAX_ACCOUNTS_PER_IP <= 0:
+    raise ValueError("PROXY_MAX_ACCOUNTS_PER_IP должен быть больше нуля")
 
 if INVITE_PAUSE_BETWEEN_MIN < 0 or INVITE_PAUSE_BETWEEN_MAX < 0:
     raise ValueError("INVITE_PAUSE_BETWEEN_MIN и INVITE_PAUSE_BETWEEN_MAX не могут быть отрицательными")
@@ -417,6 +455,277 @@ def describe_proxy_for_country(country: str) -> str:
     return desc
 
 
+def _stable_proxy_index(session_key: str, pool_size: int) -> int:
+    if pool_size <= 0:
+        return 0
+    digest = hashlib.md5(session_key.encode("utf-8")).hexdigest()
+    return int(digest, 16) % pool_size
+
+
+def load_session_proxy_bindings() -> dict[str, dict]:
+    if not SESSION_PROXY_BINDINGS_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(SESSION_PROXY_BINDINGS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k).strip().lower(): v for k, v in raw.items() if isinstance(v, dict)}
+
+
+def save_session_proxy_bindings(bindings: dict[str, dict]) -> None:
+    normalized: dict[str, dict] = {}
+    for session_name, payload in bindings.items():
+        if not isinstance(payload, dict):
+            continue
+        key = normalize_session_key(session_name)
+        if not key:
+            continue
+        pool_key = str(payload.get("pool_key", "")).strip().lower()
+        try:
+            index = int(payload.get("index", 0))
+        except (TypeError, ValueError):
+            continue
+        if not pool_key or index < 0:
+            continue
+        normalized[key] = {"pool_key": pool_key, "index": index}
+    SESSION_PROXY_BINDINGS_FILE.write_text(
+        json.dumps(normalized, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _resolve_pool_key_for_country(country: str, pools_map: dict[str, list[dict]]) -> str:
+    country_key = country.strip().lower() or "default"
+    if country_key in pools_map:
+        return country_key
+    if "default" in pools_map:
+        return "default"
+    return ""
+
+
+def resolve_proxy_for_session_with_desc(
+    session_name: str,
+    country: str,
+    *,
+    advance_rotation: bool = False,
+) -> tuple[Optional[Tuple], str]:
+    """Sticky-прокси: один session → один индекс в пуле страны."""
+    if not USE_PROXY:
+        return None, "выключен"
+
+    if not SESSION_PROXY_STICKY_ENABLED:
+        return resolve_proxy_for_country_with_desc(country, advance_rotation=advance_rotation)
+
+    pools_map = load_country_proxy_pools()
+    pool_key = _resolve_pool_key_for_country(country, pools_map)
+    if not pool_key:
+        if PROXY_ADDR:
+            return build_proxy(), f"{PROXY_TYPE}://{PROXY_ADDR}:{PROXY_PORT} (global)"
+        return None, "не найден"
+
+    pool = pools_map[pool_key]
+    session_key = normalize_session_key(session_name)
+    bindings = load_session_proxy_bindings()
+
+    if session_key in bindings:
+        stored = bindings[session_key]
+        stored_pool = str(stored.get("pool_key", "")).strip().lower()
+        try:
+            stored_index = int(stored.get("index", -1))
+        except (TypeError, ValueError):
+            stored_index = -1
+        if stored_pool == pool_key and 0 <= stored_index < len(pool):
+            selected_item = pool[stored_index]
+            selected_index = stored_index
+        else:
+            selected_index = _stable_proxy_index(session_key, len(pool))
+            selected_item = pool[selected_index]
+            bindings[session_key] = {"pool_key": pool_key, "index": selected_index}
+            save_session_proxy_bindings(bindings)
+    else:
+        selected_index = _stable_proxy_index(session_key, len(pool))
+        selected_item = pool[selected_index]
+        bindings[session_key] = {"pool_key": pool_key, "index": selected_index}
+        save_session_proxy_bindings(bindings)
+
+    proxy_tuple = _build_proxy_tuple(
+        proxy_type=selected_item["type"],
+        addr=selected_item["addr"],
+        port=selected_item["port"],
+        user=selected_item["user"],
+        password=selected_item["pass"],
+    )
+    desc = (
+        f"{_format_proxy_desc(selected_item, country_key=pool_key, selected_index=selected_index, pool_size=len(pool))}"
+        f" [sticky:{session_key}]"
+    )
+    return proxy_tuple, desc
+
+
+def resolve_proxy_for_session(session_name: str, country: str) -> Optional[Tuple]:
+    proxy_tuple, _ = resolve_proxy_for_session_with_desc(session_name, country)
+    return proxy_tuple
+
+
+def load_entity_cache() -> dict[str, dict]:
+    if not ENTITY_CACHE_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(ENTITY_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return raw
+
+
+def save_entity_cache(cache: dict[str, dict]) -> None:
+    ENTITY_CACHE_FILE.write_text(
+        json.dumps(cache, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def get_cached_entity(username: str) -> Optional[dict]:
+    key = username.strip().lower().lstrip("@")
+    if not key:
+        return None
+    entry = load_entity_cache().get(key)
+    if not isinstance(entry, dict):
+        return None
+    user_id = entry.get("id")
+    access_hash = entry.get("access_hash")
+    if user_id is None or access_hash is None:
+        return None
+    try:
+        return {"id": int(user_id), "access_hash": int(access_hash)}
+    except (TypeError, ValueError):
+        return None
+
+
+def set_cached_entity(username: str, user_id: int, access_hash: int) -> None:
+    key = username.strip().lower().lstrip("@")
+    if not key:
+        return
+    cache = load_entity_cache()
+    cache[key] = {
+        "id": int(user_id),
+        "access_hash": int(access_hash),
+        "cached_at": _utc_now().isoformat(),
+    }
+    save_entity_cache(cache)
+
+
+def load_deferred_usernames() -> dict[str, dict]:
+    if not DEFERRED_USERS_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(DEFERRED_USERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+
+    now = _utc_now()
+    active: dict[str, dict] = {}
+    changed = False
+    for username, payload in raw.items():
+        key = str(username).strip().lower().lstrip("@")
+        if not key:
+            changed = True
+            continue
+        if not isinstance(payload, dict):
+            changed = True
+            continue
+        until_dt = _parse_datetime(payload.get("until"))
+        if not until_dt or until_dt <= now:
+            changed = True
+            continue
+        active[key] = {
+            "until": until_dt.isoformat(),
+            "reason": str(payload.get("reason", "")).strip(),
+            "attempts": int(payload.get("attempts", 1)),
+        }
+    if changed:
+        save_deferred_usernames(active)
+    return active
+
+
+def save_deferred_usernames(deferred: dict[str, dict]) -> None:
+    normalized: dict[str, dict] = {}
+    for username, payload in deferred.items():
+        key = str(username).strip().lower().lstrip("@")
+        if not key or not isinstance(payload, dict):
+            continue
+        until_dt = _parse_datetime(payload.get("until"))
+        if not until_dt:
+            continue
+        normalized[key] = {
+            "until": until_dt.isoformat(),
+            "reason": str(payload.get("reason", "")).strip(),
+            "attempts": int(payload.get("attempts", 1)),
+        }
+    DEFERRED_USERS_FILE.write_text(
+        json.dumps(normalized, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def defer_username(username: str, *, seconds: int, reason: str = "") -> None:
+    key = username.strip().lower().lstrip("@")
+    if not key:
+        return
+    deferred = load_deferred_usernames()
+    prev_attempts = 0
+    if key in deferred:
+        prev_attempts = int(deferred[key].get("attempts", 0))
+    until_dt = _utc_now() + timedelta(seconds=max(1, int(seconds)))
+    deferred[key] = {
+        "until": until_dt.isoformat(),
+        "reason": reason.strip(),
+        "attempts": prev_attempts + 1,
+    }
+    save_deferred_usernames(deferred)
+
+
+def is_username_deferred(username: str) -> tuple[bool, str]:
+    key = username.strip().lower().lstrip("@")
+    if not key:
+        return False, ""
+    entry = load_deferred_usernames().get(key)
+    if not entry:
+        return False, ""
+    until_dt = _parse_datetime(entry.get("until"))
+    if not until_dt:
+        return False, ""
+    seconds_left = int((until_dt - _utc_now()).total_seconds())
+    if seconds_left <= 0:
+        return False, ""
+    reason = str(entry.get("reason", "")).strip()
+    return True, reason or f"отложен на {format_duration(seconds_left)}"
+
+
+def format_duration(seconds: int) -> str:
+    total = max(0, int(seconds))
+    if total == 0:
+        return "0с"
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}д")
+    if hours:
+        parts.append(f"{hours}ч")
+    if minutes:
+        parts.append(f"{minutes}м")
+    if secs and not parts:
+        parts.append(f"{secs}с")
+    return " ".join(parts) if parts else "0с"
+
+
 def load_processed_usernames() -> set[str]:
     if not PROCESSED_USERS_FILE.exists():
         return set()
@@ -494,7 +803,17 @@ def save_account_cooldowns(cooldowns: dict[str, dict]) -> None:
             continue
 
         reason = str(payload.get("reason", "")).strip()
-        normalized[key] = {"until": until_dt.isoformat(), "reason": reason}
+        record: dict = {"until": until_dt.isoformat(), "reason": reason}
+        if isinstance(payload, dict):
+            if "flood_incidents" in payload:
+                try:
+                    record["flood_incidents"] = int(payload["flood_incidents"])
+                except (TypeError, ValueError):
+                    pass
+            last_flood = str(payload.get("last_flood_at", "")).strip()
+            if last_flood:
+                record["last_flood_at"] = last_flood
+        normalized[key] = record
 
     ACCOUNT_COOLDOWNS_FILE.write_text(
         json.dumps(normalized, ensure_ascii=False, indent=2),
@@ -541,7 +860,17 @@ def load_account_cooldowns() -> dict[str, dict]:
             changed = True
             continue
 
-        active[key] = {"until": until_dt.isoformat(), "reason": reason}
+        record: dict = {"until": until_dt.isoformat(), "reason": reason}
+        if isinstance(payload, dict):
+            if "flood_incidents" in payload:
+                try:
+                    record["flood_incidents"] = int(payload["flood_incidents"])
+                except (TypeError, ValueError):
+                    pass
+            last_flood = str(payload.get("last_flood_at", "")).strip()
+            if last_flood:
+                record["last_flood_at"] = last_flood
+        active[key] = record
 
     if changed or len(active) != len(raw):
         save_account_cooldowns(active)
@@ -585,9 +914,15 @@ def set_account_cooldown(session_name: str, seconds: int, reason: str = "") -> d
 
     cooldown_seconds = max(1, int(seconds))
     until_dt = _utc_now() + timedelta(seconds=cooldown_seconds)
-    record = {"until": until_dt.isoformat(), "reason": reason.strip()}
+    record: dict = {"until": until_dt.isoformat(), "reason": reason.strip()}
 
     cooldowns = load_account_cooldowns()
+    existing = cooldowns.get(key, {})
+    if isinstance(existing, dict):
+        if "flood_incidents" in existing:
+            record["flood_incidents"] = existing["flood_incidents"]
+        if existing.get("last_flood_at"):
+            record["last_flood_at"] = existing["last_flood_at"]
     cooldowns[key] = record
     save_account_cooldowns(cooldowns)
     return record

@@ -14,6 +14,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
 import inviter
+import proxy_layout
 import recovery
 import session_checker
 import session_recover
@@ -146,6 +147,9 @@ def build_main_panel() -> tuple[str, InlineKeyboardMarkup]:
     kb.append([
         InlineKeyboardButton(text="🔥  Прогрев", callback_data="warm_open"),
         InlineKeyboardButton(text="📊  Статистика", callback_data="stats"),
+    ])
+    kb.append([
+        InlineKeyboardButton(text="🌐  Прокси", callback_data="proxy_open"),
     ])
 
     if not is_job_running():
@@ -1071,6 +1075,91 @@ async def recover_cleanup_dead(callback: types.CallbackQuery) -> None:
 
     session_recovery_task = asyncio.create_task(run_cleanup())
     text, markup = build_recovery_panel()
+    await _edit_or_send(callback, text, markup)
+
+
+def build_proxy_panel() -> tuple[str, InlineKeyboardMarkup]:
+    text = proxy_layout.format_layout_report_text(
+        max_per_proxy=config.PROXY_MAX_ACCOUNTS_PER_IP,
+        html=True,
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="proxy_open"),
+            InlineKeyboardButton(text="👀 Dry-run", callback_data="proxy_rebalance_dry"),
+        ],
+        [
+            InlineKeyboardButton(text="✅ Перебалансировать", callback_data="proxy_rebalance_apply"),
+        ],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="refresh_panel")],
+    ])
+    return text, markup
+
+
+@dp.message(Command("proxies"))
+async def cmd_proxies(message: types.Message) -> None:
+    text, markup = build_proxy_panel()
+    await message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+@dp.message(Command("rebalance_proxies"))
+async def cmd_rebalance_proxies(message: types.Message) -> None:
+    if is_job_running():
+        await message.answer("Сейчас идёт инвайт. Дождись завершения или останови задачу.")
+        return
+    result = proxy_layout.rebalance_session_proxies(
+        max_per_proxy=config.PROXY_MAX_ACCOUNTS_PER_IP,
+        dry_run=False,
+    )
+    report = proxy_layout.format_rebalance_result_text(result, html=True)
+    await message.answer(report, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "proxy_open")
+async def proxy_open(callback: types.CallbackQuery) -> None:
+    await callback.answer()
+    text, markup = build_proxy_panel()
+    await _edit_or_send(callback, text, markup)
+
+
+@dp.callback_query(F.data == "proxy_rebalance_dry")
+async def proxy_rebalance_dry(callback: types.CallbackQuery) -> None:
+    await callback.answer()
+    if is_job_running():
+        await callback.message.answer("Сейчас идёт инвайт. Перебалансировку лучше делать в паузе.")
+        return
+    result = proxy_layout.rebalance_session_proxies(
+        max_per_proxy=config.PROXY_MAX_ACCOUNTS_PER_IP,
+        dry_run=True,
+    )
+    text = proxy_layout.format_rebalance_result_text(result, html=True)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Применить", callback_data="proxy_rebalance_apply")],
+        [InlineKeyboardButton(text="⬅️ К раскладке", callback_data="proxy_open")],
+    ])
+    await _edit_or_send(callback, text, markup)
+
+
+@dp.callback_query(F.data == "proxy_rebalance_apply")
+async def proxy_rebalance_apply(callback: types.CallbackQuery) -> None:
+    await callback.answer()
+    if is_job_running():
+        await callback.message.answer("Сейчас идёт инвайт. Останови задачу, затем перебалансируй прокси.")
+        return
+    result = proxy_layout.rebalance_session_proxies(
+        max_per_proxy=config.PROXY_MAX_ACCOUNTS_PER_IP,
+        dry_run=False,
+    )
+    summary = proxy_layout.format_rebalance_result_text(result, html=True)
+    layout = proxy_layout.format_layout_report_text(
+        max_per_proxy=config.PROXY_MAX_ACCOUNTS_PER_IP,
+        html=True,
+    )
+    text = summary + "\n\n" + layout
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="proxy_open")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="refresh_panel")],
+    ])
     await _edit_or_send(callback, text, markup)
 
 

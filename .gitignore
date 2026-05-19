@@ -20,6 +20,9 @@ saved_target_group.txt
 country_proxies.json
 proxy_pool.json
 account_cooldowns.json
+deferred_usernames.json
+session_proxy_bindings.json
+entity_cache.json
 warmer_state.json
 invite_history.json
 privacy_blacklist.txt

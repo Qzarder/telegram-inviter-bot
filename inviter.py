@@ -22,7 +22,7 @@ from telethon.tl.functions.channels import (
     InviteToChannelRequest,
     JoinChannelRequest,
 )
-from telethon.tl.functions.contacts import SearchRequest
+from telethon.tl.types import InputUser
 
 import config
 import warmer
@@ -73,38 +73,52 @@ async def pre_invite_engagement(
         return False, short_error(exc)
 
 
-def _is_account_prewarmed(session_name: str) -> bool:
-    """Считается ли аккаунт уже прогретым (на основе warmer_state.pre_warmed)."""
+def _invite_history_key(session_name: str) -> str:
+    return config.normalize_session_key(session_name)
+
+
+def _load_invite_history_raw() -> dict:
+    ramp_file = config.BASE_DIR / "invite_history.json"
     try:
-        if not config.WARMER_STATE_FILE.exists():
-            return False
-        state = json.loads(config.WARMER_STATE_FILE.read_text(encoding="utf-8"))
-        entry = state.get("sessions", {}).get(session_name.replace("\\", "/"), {})
-        return bool(entry.get("pre_warmed"))
+        raw = json.loads(ramp_file.read_text(encoding="utf-8")) if ramp_file.exists() else {}
     except Exception:
-        return False
+        raw = {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _save_invite_history_raw(raw: dict) -> None:
+    ramp_file = config.BASE_DIR / "invite_history.json"
+    try:
+        ramp_file.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _get_invite_history_entry(session_name: str, raw: Optional[dict] = None) -> dict:
+    source = raw if raw is not None else _load_invite_history_raw()
+    key = _invite_history_key(session_name)
+    entry = source.get(key, {})
+    if isinstance(entry, dict) and entry.get("first_invite_date"):
+        return entry
+
+    # Миграция старых ключей (phone.session vs path/session)
+    basename = Path(session_name.replace("\\", "/")).name.lower()
+    for alt_key, alt_val in source.items():
+        if not isinstance(alt_val, dict):
+            continue
+        if alt_key == key or Path(str(alt_key)).name.lower() == basename:
+            if alt_val.get("first_invite_date"):
+                return alt_val
+    return entry if isinstance(entry, dict) else {}
 
 
 def _daily_invite_limit_for_account(session_name: str) -> int:
     if not config.INVITE_RAMP_UP_ENABLED:
         return _apply_flood_backoff_to_limit(session_name, config.INVITE_MAX_PER_SESSION)
 
-    # Pre-warmed аккаунты (зрелые на момент покупки) пропускают ramp-up
-    if _is_account_prewarmed(session_name):
-        return _apply_flood_backoff_to_limit(session_name, config.INVITE_MAX_PER_SESSION)
-
-    _RAMP_FILE = config.BASE_DIR / "invite_history.json"
-    try:
-        raw = json.loads(_RAMP_FILE.read_text(encoding="utf-8")) if _RAMP_FILE.exists() else {}
-    except Exception:
-        raw = {}
-
-    if not isinstance(raw, dict):
-        raw = {}
-
-    key = session_name.replace("\\", "/").strip().lower()
-    account_data = raw.get(key, {})
-
+    raw = _load_invite_history_raw()
+    key = _invite_history_key(session_name)
+    account_data = _get_invite_history_entry(session_name, raw)
     if not isinstance(account_data, dict):
         account_data = {}
 
@@ -114,10 +128,7 @@ def _daily_invite_limit_for_account(session_name: str) -> int:
     if not first_date_str:
         account_data["first_invite_date"] = now
         raw[key] = account_data
-        try:
-            _RAMP_FILE.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        _save_invite_history_raw(raw)
         first_date_str = now
 
     try:
@@ -138,6 +149,55 @@ def _daily_invite_limit_for_account(session_name: str) -> int:
     else:
         base = config.INVITE_MAX_PER_SESSION
     return _apply_flood_backoff_to_limit(session_name, base)
+
+
+def _should_skip_pre_engage(session_name: str) -> bool:
+    return _get_flood_incidents(session_name) > 0
+
+
+async def _resolve_invite_target(
+    client: TelegramClient,
+    target_user: str,
+) -> tuple[object, Optional[int]]:
+    """Резолв цели без глобального SearchRequest (по умолчанию)."""
+    clean_name = target_user.lstrip("@")
+    target_user_id: Optional[int] = None
+
+    if config.INVITE_ENTITY_CACHE_ENABLED:
+        cached = config.get_cached_entity(clean_name)
+        if cached:
+            target_user_id = cached["id"]
+            return (
+                InputUser(cached["id"], cached["access_hash"]),
+                target_user_id,
+            )
+
+    if config.INVITE_USE_SEARCH_REQUEST:
+        from telethon.tl.functions.contacts import SearchRequest
+
+        search_res = await client(SearchRequest(q=clean_name, limit=3))
+        for user in getattr(search_res, "users", []):
+            if (getattr(user, "username", "") or "").lower() == clean_name.lower():
+                target_user_id = getattr(user, "id", None)
+                access_hash = getattr(user, "access_hash", None)
+                if target_user_id is not None and access_hash is not None:
+                    config.set_cached_entity(clean_name, int(target_user_id), int(access_hash))
+                return user, target_user_id
+
+    user_entity = await client.get_entity(target_user)
+    target_user_id = getattr(user_entity, "id", None)
+    access_hash = getattr(user_entity, "access_hash", None)
+    if target_user_id is not None and access_hash is not None:
+        config.set_cached_entity(clean_name, int(target_user_id), int(access_hash))
+    return user_entity, target_user_id
+
+
+def _defer_current_user(target_user: str, *, reason: str) -> None:
+    config.defer_username(
+        target_user,
+        seconds=config.INVITE_DEFER_USER_HOURS * 3600,
+        reason=reason,
+    )
 
 
 def _get_first_invite_delay(session_name: str) -> float:
@@ -630,9 +690,10 @@ async def validate_sessions(
         )
 
     for idx, session_path in enumerate(session_files, start=1):
+        session_name = str(session_path.relative_to(config.SESSIONS_DIR)).replace("\\", "/")
         country = detect_session_country(session_path)
         try:
-            proxy, proxy_desc = config.resolve_proxy_for_country_with_desc(country)
+            proxy, proxy_desc = config.resolve_proxy_for_session_with_desc(session_name, country)
         except Exception as exc:
             error_count += 1
             await safe_report_text(
@@ -649,7 +710,6 @@ async def validate_sessions(
             )
             continue
 
-        session_name = str(session_path.relative_to(config.SESSIONS_DIR)).replace("\\", "/")
         if config.USE_PROXY:
             proxy_ok, proxy_error = await is_proxy_reachable(proxy, config.PROXY_CHECK_TIMEOUT)
             if not proxy_ok:
@@ -729,6 +789,41 @@ async def validate_sessions(
     )
 
 
+async def _handle_account_limit_hit(
+    *,
+    loop: asyncio.AbstractEventLoop,
+    session_name: str,
+    target_user: str,
+    limit_incident_times: list[float],
+    report_text: Optional[TextReportCallback],
+    reason_label: str,
+) -> None:
+    """Откладывает юзера, сдвигает очередь, пауза задачи + circuit breaker."""
+    _defer_current_user(target_user, reason=reason_label)
+    limit_incident_times.append(loop.time())
+    window = config.INVITE_CIRCUIT_BREAKER_WINDOW_SECONDS
+    cutoff = loop.time() - window
+    recent = [t for t in limit_incident_times if t >= cutoff]
+    limit_incident_times[:] = recent
+
+    pause_seconds = config.INVITE_CASCADE_PAUSE_SECONDS
+    if len(recent) >= config.INVITE_CIRCUIT_BREAKER_THRESHOLD:
+        pause_seconds = max(pause_seconds, config.INVITE_CIRCUIT_BREAKER_PAUSE_SECONDS)
+        await safe_report_text(
+            report_text,
+            f"Circuit breaker: {len(recent)} лимитных сбоя за {window}с. "
+            f"Пауза задачи {config.format_duration(pause_seconds)}.",
+        )
+    else:
+        await safe_report_text(
+            report_text,
+            f"{session_name}: {reason_label}. Пропускаю @{target_user}, "
+            f"пауза {config.format_duration(pause_seconds)} (анти-каскад).",
+        )
+    if pause_seconds > 0:
+        await asyncio.sleep(pause_seconds)
+
+
 async def run_invite_task(
     target_group: str,
     users_list: List[str],
@@ -762,6 +857,23 @@ async def run_invite_task(
 
     processed_users = config.load_processed_usernames()
     cooldowns = config.load_account_cooldowns()
+    deferred_users = config.load_deferred_usernames()
+
+    available_at_start = 0
+    for session_path in session_files:
+        session_name = str(session_path.relative_to(config.SESSIONS_DIR)).replace("\\", "/")
+        cd = cooldowns.get(config.normalize_session_key(session_name))
+        if cd and config.get_cooldown_seconds_left(cd) > 0:
+            continue
+        available_at_start += 1
+
+    if available_at_start < config.INVITE_MIN_READY_ACCOUNTS:
+        await safe_report_text(
+            report_text,
+            f"Pre-flight: доступно аккаунтов {available_at_start}, нужно минимум "
+            f"{config.INVITE_MIN_READY_ACCOUNTS}. Дождитесь окончания отлежки или добавьте аккаунты.",
+        )
+        return
 
     user_idx = 0
     total_users = len(users_list)
@@ -775,6 +887,11 @@ async def run_invite_task(
     proxy_check_failed_count = 0
     spambot_limited_skipped = 0
     spambot_unknown_count = 0
+    deferred_skipped_count = 0
+    cascade_pause_count = 0
+    circuit_breaker_triggers = 0
+    accounts_burned_on_same_user = 0
+    limit_incident_times: list[float] = []
     proxy_emergency_reason = ""
     stopped_by_user = False
     loop = asyncio.get_running_loop()
@@ -795,7 +912,7 @@ async def run_invite_task(
 
         country = detect_session_country(session_path)
         try:
-            proxy, proxy_desc = config.resolve_proxy_for_country_with_desc(country)
+            proxy, proxy_desc = config.resolve_proxy_for_session_with_desc(session_name, country)
         except Exception as exc:
             logger.error("Ошибка конфигурации прокси для страны %s: %s", country, exc)
             await safe_report_text(
@@ -1164,7 +1281,9 @@ async def run_invite_task(
             await asyncio.sleep(wait_sec)
             continue
 
-        for worker in ready_workers:
+        # За одну итерацию — один аккаунт на одного юзера (анти-каскад).
+        invite_attempt_done = False
+        for worker in ready_workers[:1]:
             if stop_event and stop_event.is_set():
                 stopped_by_user = True
                 break
@@ -1173,8 +1292,8 @@ async def run_invite_task(
                 break
 
             session_name: str = worker["session_name"]
-
-            if worker["invites_done"] >= min(_daily_invite_limit_for_account(session_name), config.INVITE_MAX_PER_SESSION):
+            daily_cap = min(_daily_invite_limit_for_account(session_name), config.INVITE_MAX_PER_SESSION)
+            if daily_cap < 1 or worker["invites_done"] >= daily_cap:
                 continue
 
             target_user = normalize_user(users_list[user_idx])
@@ -1182,54 +1301,60 @@ async def run_invite_task(
             if not target_user:
                 user_idx += 1
                 skipped_count += 1
-                continue
+                invite_attempt_done = True
+                break
 
             if target_user.lower() in processed_users:
                 user_idx += 1
                 skipped_count += 1
                 await safe_report_user(report_user, target_user, "skipped", "уже обработан ранее")
-                continue
+                invite_attempt_done = True
+                break
 
-            # Blacklist privacy-restricted юзеров — больше не пытаемся их инвайтить
+            is_deferred, defer_reason = config.is_username_deferred(target_user)
+            if is_deferred:
+                user_idx += 1
+                deferred_skipped_count += 1
+                await safe_report_user(report_user, target_user, "skipped", defer_reason)
+                invite_attempt_done = True
+                break
+
             if target_user.lower() in privacy_blacklist:
                 user_idx += 1
                 skipped_count += 1
                 await safe_report_user(report_user, target_user, "skipped", "приватность (blacklist)")
-                continue
+                invite_attempt_done = True
+                break
 
             client: TelegramClient = worker["client"]
 
-            if config.INVITE_PRE_ENGAGE_ENABLED and not worker.get("pre_engage_done"):
+            if (
+                config.INVITE_PRE_ENGAGE_ENABLED
+                and not worker.get("pre_engage_done")
+                and not _should_skip_pre_engage(session_name)
+            ):
                 worker["pre_engage_done"] = True
                 ok, detail = await pre_invite_engagement(client, target_group, session_name)
                 if ok:
                     await safe_report_text(report_text, f"{session_name}: {detail} в @{target_group} перед инвайтом.")
                 else:
                     logger.warning("  ⚠️ pre-engage не удался: %s", detail)
+            elif config.INVITE_PRE_ENGAGE_ENABLED and not worker.get("pre_engage_done"):
+                worker["pre_engage_done"] = True
+                logger.info("[%s] pre-engage пропущен (ранее был FloodWait)", session_name)
 
             daily_limit = _daily_invite_limit_for_account(session_name)
+            if daily_limit < 1:
+                continue
             if worker["invites_done"] >= daily_limit:
                 continue
 
             try:
-                # Резолвим сущность пользователя заранее, чтобы проверить результат инвайта по ID
                 user_entity = None
                 target_user_id = None
-                if config.INVITE_VERIFY_ENABLED:
-                    # contacts.Search вместо ResolveUsername — реже триггерит
-                    # FloodWait при разогреве (трюк из NabiKAZ/bypass-telegram-floodwait)
+                if config.INVITE_VERIFY_ENABLED or config.INVITE_ENTITY_CACHE_ENABLED:
                     try:
-                        clean_name = target_user.lstrip("@")
-                        search_res = await client(SearchRequest(q=clean_name, limit=3))
-                        for user in getattr(search_res, "users", []):
-                            if (getattr(user, "username", "") or "").lower() == clean_name.lower():
-                                user_entity = user
-                                target_user_id = getattr(user, "id", None)
-                                break
-                        # Fallback на get_entity если search не нашёл
-                        if user_entity is None:
-                            user_entity = await client.get_entity(target_user)
-                            target_user_id = getattr(user_entity, "id", None)
+                        user_entity, target_user_id = await _resolve_invite_target(client, target_user)
                     except Exception:
                         pass
 
@@ -1252,7 +1377,8 @@ async def run_invite_task(
                             "инвайт не подтверждён (настройки приватности)",
                         )
                         worker["next_ready"] = loop.time() + random.randint(5, 15)
-                        continue
+                        invite_attempt_done = True
+                        break
 
                 worker["invites_done"] += 1
                 worker["invites_sent_total"] += 1
@@ -1301,11 +1427,12 @@ async def run_invite_task(
                     # Сохраняем ссылку чтобы task не упал в GC
                     worker.setdefault("bg_tasks", set()).add(bg_task)
                     bg_task.add_done_callback(lambda t, w=worker: w["bg_tasks"].discard(t))
+                invite_attempt_done = True
+                break
             except UserPrivacyRestrictedError:
                 user_idx += 1
                 skipped_count += 1
                 append_processed_user(target_user, processed_users)
-                # Постоянно добавляем в blacklist чтобы не тратить лимит впустую
                 _add_to_privacy_blacklist(target_user)
                 privacy_blacklist.add(target_user.lower())
                 await safe_report_user(
@@ -1314,11 +1441,11 @@ async def run_invite_task(
                     "skipped",
                     "у пользователя закрыты приглашения (в blacklist)",
                 )
+                invite_attempt_done = True
+                break
             except FloodWaitError as exc:
                 worker["active"] = False
-                # Инкремент счётчика FloodWait для этого акка → следующий
-                # дневной лимит будет уменьшен вдвое (см. _apply_flood_backoff_to_limit)
-                new_incidents = _increment_flood_incidents(session_name)
+                _increment_flood_incidents(session_name)
                 cooldown_seconds = config.build_floodwait_cooldown_seconds(exc.seconds)
                 cooldown_record = config.set_account_cooldown(
                     session_name=session_name,
@@ -1327,6 +1454,7 @@ async def run_invite_task(
                 )
                 cooldowns[config.normalize_session_key(session_name)] = cooldown_record
                 cooldown_added_count += 1
+                accounts_burned_on_same_user += 1
                 logger.warning(
                     "[%s] FloodWait %s сек. Аккаунт в отлежке %s.",
                     session_name,
@@ -1337,9 +1465,22 @@ async def run_invite_task(
                     report_text,
                     f"{session_name}: FloodWait {exc.seconds} сек, аккаунт в отлежке на {format_duration(cooldown_seconds)}.",
                 )
+                user_idx += 1
+                cascade_pause_count += 1
+                await _handle_account_limit_hit(
+                    loop=loop,
+                    session_name=session_name,
+                    target_user=target_user,
+                    limit_incident_times=limit_incident_times,
+                    report_text=report_text,
+                    reason_label=f"FloodWait {exc.seconds}с",
+                )
+                if len(limit_incident_times) >= config.INVITE_CIRCUIT_BREAKER_THRESHOLD:
+                    circuit_breaker_triggers += 1
+                invite_attempt_done = True
+                break
             except PeerFloodError:
                 worker["active"] = False
-                # Инкремент счётчика FloodWait/PeerFlood для этого акка
                 _increment_flood_incidents(session_name)
                 cooldown_seconds = config.build_invite_ban_cooldown_seconds()
                 cooldown_record = config.set_account_cooldown(
@@ -1349,6 +1490,7 @@ async def run_invite_task(
                 )
                 cooldowns[config.normalize_session_key(session_name)] = cooldown_record
                 cooldown_added_count += 1
+                accounts_burned_on_same_user += 1
                 logger.warning(
                     "[%s] Инвайт-бан (PeerFlood). Аккаунт в отлежке %s.",
                     session_name,
@@ -1358,6 +1500,20 @@ async def run_invite_task(
                     report_text,
                     f"{session_name}: инвайт-бан (PeerFlood), аккаунт в отлежке на {format_duration(cooldown_seconds)}.",
                 )
+                user_idx += 1
+                cascade_pause_count += 1
+                await _handle_account_limit_hit(
+                    loop=loop,
+                    session_name=session_name,
+                    target_user=target_user,
+                    limit_incident_times=limit_incident_times,
+                    report_text=report_text,
+                    reason_label="PeerFlood",
+                )
+                if len(limit_incident_times) >= config.INVITE_CIRCUIT_BREAKER_THRESHOLD:
+                    circuit_breaker_triggers += 1
+                invite_attempt_done = True
+                break
             except Exception as exc:
                 error_text = str(exc).lower()
                 if config.USE_PROXY and is_proxy_related_error(error_text):
@@ -1382,6 +1538,7 @@ async def run_invite_task(
 
                 if is_invite_ban_error(error_text):
                     worker["active"] = False
+                    _increment_flood_incidents(session_name)
                     cooldown_seconds = config.build_invite_ban_cooldown_seconds()
                     cooldown_record = config.set_account_cooldown(
                         session_name=session_name,
@@ -1390,6 +1547,7 @@ async def run_invite_task(
                     )
                     cooldowns[config.normalize_session_key(session_name)] = cooldown_record
                     cooldown_added_count += 1
+                    accounts_burned_on_same_user += 1
                     logger.warning(
                         "[%s] Похоже на инвайт-бан: %s. Отлежка %s.",
                         session_name,
@@ -1400,7 +1558,20 @@ async def run_invite_task(
                         report_text,
                         f"{session_name}: похоже на инвайт-бан ({short_error(exc)}), аккаунт в отлежке на {format_duration(cooldown_seconds)}.",
                     )
-                    continue
+                    user_idx += 1
+                    cascade_pause_count += 1
+                    await _handle_account_limit_hit(
+                        loop=loop,
+                        session_name=session_name,
+                        target_user=target_user,
+                        limit_incident_times=limit_incident_times,
+                        report_text=report_text,
+                        reason_label=short_error(exc),
+                    )
+                    if len(limit_incident_times) >= config.INVITE_CIRCUIT_BREAKER_THRESHOLD:
+                        circuit_breaker_triggers += 1
+                    invite_attempt_done = True
+                    break
 
                 user_idx += 1
                 if is_terminal_user_error(error_text):
@@ -1421,6 +1592,8 @@ async def run_invite_task(
                         short_error(exc),
                     )
                     worker["next_ready"] = loop.time() + 3
+                invite_attempt_done = True
+                break
 
         if proxy_emergency_reason:
             break
@@ -1467,7 +1640,11 @@ async def run_invite_task(
         f"Пропущено по @SpamBot: {spambot_limited_skipped}\n"
         f"Неясный ответ @SpamBot: {spambot_unknown_count}\n"
         f"Ждали одобрение админа: {approval_waiting_start_count}\n"
-        f"Одобрены во время задачи: {approval_approved_count}"
+        f"Одобрены во время задачи: {approval_approved_count}\n"
+        f"Пропущено (отложенные юзеры): {deferred_skipped_count}\n"
+        f"Анти-каскад пауз: {cascade_pause_count}\n"
+        f"Circuit breaker срабатываний: {circuit_breaker_triggers}\n"
+        f"Аккаунтов сожжено на одном юзере (лимит): {accounts_burned_on_same_user}"
     )
     if proxy_emergency_reason:
         summary += f"\nПричина экстренной остановки: {proxy_emergency_reason}"

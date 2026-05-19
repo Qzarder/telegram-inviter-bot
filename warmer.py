@@ -370,9 +370,13 @@ def _default_session_state() -> dict:
         # Сверка с реальным состоянием Telegram: сколько каналов/групп реально у юзера.
         # -1 = не синкали ещё. После первого sync — реальное число.
         "real_channels_count": -1,
-        # True если аккаунт пред-прогрет (предыдущий владелец вступал в каналы).
-        # Такие пропускают warmer и сразу идут в инвайт.
+        # True если у аккаунта много чатов с прошлого владельца (не = готов к инвайту).
         "pre_warmed": False,
+        # Действия прогрева на ТЕКУЩЕМ прокси (join, реакции, DM).
+        "proxy_warmup_actions": 0,
+        # Готов к инвайту только после proxy_warmup на вашем IP.
+        "proxy_warmup_done": False,
+        "proxy_warmup_at": "",
     }
 
 
@@ -477,11 +481,10 @@ async def _sync_real_channel_state(
     if real_count >= threshold:
         if not entry.get("pre_warmed"):
             entry["pre_warmed"] = True
-            entry["cycle_completed"] = True
             entry["last_status"] = "pre_warmed"
             entry["last_error"] = ""
             logger.info(
-                "  ⚡ %s: уже зрелый (%d каналов в Telegram) → отправляю в инвайт без прогрева",
+                "  ⚡ %s: внешняя история (%d каналов) → нужен proxy_warmup перед инвайтом",
                 session_name,
                 real_count,
             )
@@ -1253,6 +1256,12 @@ def load_warmer_state() -> dict:
                 entry["real_channels_count"] = -1
             entry["real_state_synced"] = bool(payload.get("real_state_synced", False))
             entry["pre_warmed"] = bool(payload.get("pre_warmed", False))
+            try:
+                entry["proxy_warmup_actions"] = int(payload.get("proxy_warmup_actions", 0))
+            except (TypeError, ValueError):
+                entry["proxy_warmup_actions"] = 0
+            entry["proxy_warmup_done"] = bool(payload.get("proxy_warmup_done", False))
+            entry["proxy_warmup_at"] = str(payload.get("proxy_warmup_at", "")).strip()
 
         sessions[session_name] = entry
 
@@ -1400,7 +1409,29 @@ def _is_cycle_completed(entry: dict, channels: list[str]) -> bool:
     return channels_set.issubset(joined.union(failed))
 
 
+def _migrate_proxy_warmup_legacy(entry: dict, channels: list[str]) -> None:
+    """Аккаунты, полностью прогретые у нас до введения proxy_warmup_done."""
+    if entry.get("proxy_warmup_done"):
+        return
+    if _is_cycle_completed(entry, channels) and str(entry.get("last_success_at", "")).strip():
+        entry["proxy_warmup_done"] = True
+        entry["proxy_warmup_at"] = str(entry.get("last_success_at", "")).strip()
+
+
+def _record_proxy_warmup_actions(entry: dict, count: int) -> None:
+    if count <= 0:
+        return
+    current = int(entry.get("proxy_warmup_actions", 0))
+    entry["proxy_warmup_actions"] = current + count
+    if entry["proxy_warmup_actions"] >= config.WARMER_PROXY_WARMUP_MIN_ACTIONS:
+        entry["proxy_warmup_done"] = True
+        entry["proxy_warmup_at"] = _utc_now().isoformat()
+
+
 def _is_entry_in_work(entry: dict, channels: list[str]) -> bool:
+    _migrate_proxy_warmup_legacy(entry, channels)
+    if not entry.get("proxy_warmup_done", False):
+        return False
     if _is_cycle_completed(entry, channels):
         return True
     return bool(entry.get("manual_enabled", False))
@@ -1775,9 +1806,10 @@ async def join_channel(client: TelegramClient, channel: str) -> tuple[bool, bool
 
 
 async def fetch_identity_from_session(session_path: Path) -> tuple[Optional[tuple[int, str]], str]:
+    session_name = get_session_name(session_path)
     country = detect_session_country(session_path)
     try:
-        proxy, _ = config.resolve_proxy_for_country_with_desc(country, advance_rotation=False)
+        proxy, _ = config.resolve_proxy_for_session_with_desc(session_name, country)
     except Exception as exc:
         return None, f"ошибка прокси: {_short_error(exc)}"
 
@@ -1937,7 +1969,7 @@ async def process_account_cycle(
 
     country = detect_session_country(session_path)
     try:
-        proxy, proxy_desc = config.resolve_proxy_for_country_with_desc(country)
+        proxy, proxy_desc = config.resolve_proxy_for_session_with_desc(session_name, country)
     except Exception as exc:
         entry["cycle_completed"] = False
         entry["last_status"] = "error"
@@ -2012,6 +2044,7 @@ async def process_account_cycle(
                     stop_event=stop_event,
                 )
                 total = sum(counters.values())
+                _record_proxy_warmup_actions(entry, total)
                 if total > 0:
                     logger.info(
                         "  ✨ %s: реальных действий: реакции=%d forward=%d опросы=%d DM=%d",
@@ -2190,6 +2223,7 @@ async def process_account_cycle(
             joined_channels.add(channel_key)
             joined_channels_ordered.append(channel_norm)
             entry["joined_channels"] = joined_channels_ordered
+            _record_proxy_warmup_actions(entry, 1)
             pass_budget -= 1
 
             if await _random_delay(config.WARMER_STEP_DELAY_MIN, config.WARMER_STEP_DELAY_MAX, stop_event=stop_event):
@@ -2197,6 +2231,8 @@ async def process_account_cycle(
 
         entry["cycle_completed"] = _is_cycle_completed(entry, channels)
         if entry["cycle_completed"]:
+            entry["proxy_warmup_done"] = True
+            entry["proxy_warmup_at"] = _utc_now().isoformat()
             if failed_channels:
                 entry["last_status"] = "completed_with_warnings"
                 entry["last_error"] = f"пропущено каналов: {len(failed_channels)}"

@@ -179,7 +179,8 @@ async def validate_session_file(
     proxy = None
     if use_proxy:
         try:
-            proxy, _ = config.resolve_proxy_for_country_with_desc(country, advance_rotation=False)
+            session_name = str(session_path.relative_to(config.SESSIONS_DIR)).replace("\\", "/")
+            proxy, _ = config.resolve_proxy_for_session_with_desc(session_name, country)
         except Exception:
             proxy = None
 
