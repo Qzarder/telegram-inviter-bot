@@ -13,6 +13,7 @@ from telethon.errors import (
     FloodWaitError,
     InviteRequestSentError,
     PeerFloodError,
+    RPCError,
     UserAlreadyParticipantError,
     UserNotParticipantError,
     UserPrivacyRestrictedError,
@@ -1281,6 +1282,28 @@ async def run_invite_task(
             await asyncio.sleep(wait_sec)
             continue
 
+        # Если у ВСЕХ ready_workers daily_cap=0 или они исчерпали лимит,
+        # дальше делать нечего — выходим из задачи с понятным сообщением.
+        all_capped = True
+        capped_details: list[str] = []
+        for w in ready_workers:
+            sname = w["session_name"]
+            cap = min(_daily_invite_limit_for_account(sname), config.INVITE_MAX_PER_SESSION)
+            done = w["invites_done"]
+            if cap >= 1 and done < cap:
+                all_capped = False
+                break
+            capped_details.append(f"{sname}: cap={cap} done={done}")
+        if all_capped:
+            sample = "; ".join(capped_details[:3])
+            await safe_report_text(
+                report_text,
+                f"Все ready-аккаунты исчерпали дневной лимит инвайтов (ramp-up или backoff). "
+                f"Пример: {sample}. Останавливаю задачу — попробуй завтра или измени INVITE_MAX_PER_SESSION."
+            )
+            logger.info("📊 Все ready_workers с daily_cap=0 или done>=cap — задача завершается")
+            break
+
         # За одну итерацию — один аккаунт на одного юзера (анти-каскад).
         invite_attempt_done = False
         for worker in ready_workers[:1]:
@@ -1514,6 +1537,27 @@ async def run_invite_task(
                     circuit_breaker_triggers += 1
                 invite_attempt_done = True
                 break
+            except RPCError as exc:
+                # Серверные ошибки Telegram (-500 "No workers running", -503, 429 и т.п.):
+                # это не наша вина и не аккаунта, а сбой на стороне Telegram/прокси.
+                # Не баним акк, не палим cooldown — просто ждём 60-120 сек и продолжаем.
+                code = getattr(exc, "code", None) or getattr(exc, "rpc_code", None)
+                if isinstance(code, int) and code < 0 or (isinstance(code, int) and code in (429, 500, 502, 503, 504)):
+                    cooldown = random.uniform(60, 180)
+                    logger.warning(
+                        "[%s] Telegram server error %s: %s. Ждём %.0f сек и пробуем дальше.",
+                        session_name, code, short_error(exc), cooldown,
+                    )
+                    await safe_report_text(
+                        report_text,
+                        f"{session_name}: серверный сбой Telegram ({code}). Пауза {int(cooldown)} сек.",
+                    )
+                    await asyncio.sleep(cooldown)
+                    # Не инкрементируем user_idx — пробуем того же юзера снова
+                    invite_attempt_done = True
+                    break
+                # Не серверная RPCError → отдаём в общий except
+                raise
             except Exception as exc:
                 error_text = str(exc).lower()
                 if config.USE_PROXY and is_proxy_related_error(error_text):
