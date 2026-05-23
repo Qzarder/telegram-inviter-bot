@@ -1345,7 +1345,11 @@ async def stop_invite(callback: types.CallbackQuery) -> None:
         await callback.message.answer("Остановить задачу может только тот, кто ее запустил.")
         return
 
+    # 1. Сигналим soft-stop через event
     current_job.stop_event.set()
+    job_ref = current_job
+    chat_id = callback.message.chat.id if callback.message else current_job.chat_id
+
     if callback.message:
         text, markup = build_main_panel()
         try:
@@ -1355,7 +1359,28 @@ async def stop_invite(callback: types.CallbackQuery) -> None:
                 parse_mode="HTML",
             )
         except Exception:
-            await callback.message.answer("Принято. Останавливаю задачу, дождись финального отчёта.")
+            await callback.message.answer("Принято. Останавливаю задачу.")
+
+    # 2. Через 5 сек если задача всё ещё крутится — force-cancel.
+    # Это пробивает любые asyncio.sleep (circuit breaker pause, global delay и т.п.).
+    async def _force_cancel_after(delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            if job_ref.task and not job_ref.task.done():
+                job_ref.task.cancel()
+                logger.info("Force-cancel задачи (soft-stop не сработал за %.0fs)", delay)
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        "⏹ Задача принудительно остановлена (force-cancel). "
+                        "Аккаунты в отлёжке остаются как есть.",
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning("force-cancel ошибка: %s", exc)
+
+    asyncio.create_task(_force_cancel_after(5.0))
 
 
 @dp.callback_query(F.data == "change_group")

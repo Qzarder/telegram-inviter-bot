@@ -798,8 +798,13 @@ async def _handle_account_limit_hit(
     limit_incident_times: list[float],
     report_text: Optional[TextReportCallback],
     reason_label: str,
+    stop_event: Optional[asyncio.Event] = None,
 ) -> None:
-    """Откладывает юзера, сдвигает очередь, пауза задачи + circuit breaker."""
+    """Откладывает юзера, сдвигает очередь, пауза задачи + circuit breaker.
+
+    Пауза прерывается через stop_event — Stop button в боте срабатывает
+    даже во время 1-часового circuit breaker pause.
+    """
     _defer_current_user(target_user, reason=reason_label)
     limit_incident_times.append(loop.time())
     window = config.INVITE_CIRCUIT_BREAKER_WINDOW_SECONDS
@@ -822,7 +827,15 @@ async def _handle_account_limit_hit(
             f"пауза {config.format_duration(pause_seconds)} (анти-каскад).",
         )
     if pause_seconds > 0:
-        await asyncio.sleep(pause_seconds)
+        # stop_event-aware sleep: Stop button в боте прерывает паузу мгновенно
+        if stop_event is not None:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=pause_seconds)
+                # Если дождались — stop_event сработал
+            except asyncio.TimeoutError:
+                pass  # обычная пауза истекла
+        else:
+            await asyncio.sleep(pause_seconds)
 
 
 async def run_invite_task(
@@ -1497,6 +1510,7 @@ async def run_invite_task(
                     limit_incident_times=limit_incident_times,
                     report_text=report_text,
                     reason_label=f"FloodWait {exc.seconds}с",
+                    stop_event=stop_event,
                 )
                 if len(limit_incident_times) >= config.INVITE_CIRCUIT_BREAKER_THRESHOLD:
                     circuit_breaker_triggers += 1
@@ -1532,6 +1546,7 @@ async def run_invite_task(
                     limit_incident_times=limit_incident_times,
                     report_text=report_text,
                     reason_label="PeerFlood",
+                    stop_event=stop_event,
                 )
                 if len(limit_incident_times) >= config.INVITE_CIRCUIT_BREAKER_THRESHOLD:
                     circuit_breaker_triggers += 1
@@ -1610,7 +1625,9 @@ async def run_invite_task(
                         target_user=target_user,
                         limit_incident_times=limit_incident_times,
                         report_text=report_text,
-                        reason_label=short_error(exc),
+                        reason_label=short_error(exc,
+                    stop_event=stop_event,
+                ),
                     )
                     if len(limit_incident_times) >= config.INVITE_CIRCUIT_BREAKER_THRESHOLD:
                         circuit_breaker_triggers += 1
