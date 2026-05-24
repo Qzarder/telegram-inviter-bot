@@ -39,6 +39,117 @@ def _account_delay_multiplier(session_name: str) -> float:
     return 0.7 + (digest % 101) / 100.0 * 0.6
 
 
+# ============================================================
+# App-like behavior: имитация что юзер пользуется Telegram-приложением,
+# а не дёргает API. Снижает score "бот-like" поведения.
+# ============================================================
+
+
+async def _app_session_open(
+    client: TelegramClient,
+    session_name: str,
+) -> None:
+    """Имитирует "юзер открыл Telegram":
+    - выставляет онлайн-статус
+    - открывает список диалогов (как реальный клиент при старте)
+    - "залипает" 3-10 сек как будто читает уведомления
+    """
+    try:
+        from telethon.tl.functions.account import UpdateStatusRequest
+        try:
+            await client(UpdateStatusRequest(offline=False))
+        except Exception:
+            pass
+
+        # Открыл список диалогов — как реальный клиент
+        dialog_count = 0
+        async for dialog in client.iter_dialogs(limit=random.randint(10, 25)):
+            if dialog:
+                dialog_count += 1
+            # короткие микро-паузы — глаз скроллит
+            if random.random() < 0.3:
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+        logger.info("  📱 %s: app-open, увидел %d диалогов", session_name, dialog_count)
+
+        # "Залип" на главном экране
+        await asyncio.sleep(random.uniform(3, 10))
+    except Exception as exc:
+        logger.debug("app_session_open(%s): %s", session_name, short_error(exc))
+
+
+async def _app_session_pre_invite(
+    client: TelegramClient,
+    target_group: str,
+    session_name: str,
+) -> None:
+    """Имитация момента "юзер открыл группу и нажимает Добавить":
+    - typing-индикатор в группе (как будто что-то делает)
+    - короткая пауза (нажатие кнопок ассистента, ввод имени)
+    """
+    try:
+        from telethon.tl.functions.messages import SetTypingRequest
+        from telethon.tl.types import SendMessageTypingAction
+        try:
+            await client(SetTypingRequest(
+                peer=target_group,
+                action=SendMessageTypingAction(),
+            ))
+        except Exception:
+            pass
+        # "Юзер ввёл @username, выбрал из списка, нажал Добавить"
+        await asyncio.sleep(random.uniform(2, 6))
+    except Exception as exc:
+        logger.debug("app_session_pre_invite(%s): %s", session_name, short_error(exc))
+
+
+async def _app_session_post_invite(
+    client: TelegramClient,
+    target_group: str,
+    session_name: str,
+) -> None:
+    """Имитация "юзер ещё посидел в приложении после действия":
+    - продолжает читать группу
+    - открывает другой случайный канал
+    - в конце — устанавливает offline (50% шанс)
+    """
+    try:
+        # Продолжил читать целевую группу
+        post_invite_read = 0
+        async for msg in client.iter_messages(target_group, limit=random.randint(2, 6)):
+            if msg and getattr(msg, "id", 0):
+                post_invite_read += 1
+            await asyncio.sleep(random.uniform(2, 8))
+
+        # 40% шанс — открыл другой случайный канал из подписок
+        if random.random() < 0.4:
+            try:
+                dialogs = []
+                async for d in client.iter_dialogs(limit=30):
+                    if d and (d.is_channel or d.is_group):
+                        dialogs.append(d)
+                if dialogs:
+                    other = random.choice(dialogs)
+                    other_read = 0
+                    async for msg in client.iter_messages(other.entity, limit=random.randint(2, 5)):
+                        if msg and getattr(msg, "id", 0):
+                            other_read += 1
+                        await asyncio.sleep(random.uniform(1.5, 5))
+                    logger.info("  📱 %s: после инвайта посмотрел ещё @%s (%d постов)",
+                                session_name, getattr(other.entity, "username", "?"), other_read)
+            except Exception:
+                pass
+
+        # В половине случаев — закрыл приложение
+        if random.random() < 0.5:
+            try:
+                from telethon.tl.functions.account import UpdateStatusRequest
+                await client(UpdateStatusRequest(offline=True))
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("app_session_post_invite(%s): %s", session_name, short_error(exc))
+
+
 async def pre_invite_engagement(
     client: TelegramClient,
     target_group: str,
@@ -1364,6 +1475,11 @@ async def run_invite_task(
 
             client: TelegramClient = worker["client"]
 
+            # App-like behavior: имитируем "юзер открыл Telegram" один раз за сессию
+            if config.INVITE_APP_LIKE_ENABLED and not worker.get("app_opened"):
+                worker["app_opened"] = True
+                await _app_session_open(client, session_name)
+
             if (
                 config.INVITE_PRE_ENGAGE_ENABLED
                 and not worker.get("pre_engage_done")
@@ -1378,6 +1494,10 @@ async def run_invite_task(
             elif config.INVITE_PRE_ENGAGE_ENABLED and not worker.get("pre_engage_done"):
                 worker["pre_engage_done"] = True
                 logger.info("[%s] pre-engage пропущен (ранее был FloodWait)", session_name)
+
+            # App-like: typing-индикатор перед нажатием "Добавить"
+            if config.INVITE_APP_LIKE_ENABLED:
+                await _app_session_pre_invite(client, target_group, session_name)
 
             daily_limit = _daily_invite_limit_for_account(session_name)
             if daily_limit < 1:
@@ -1422,6 +1542,12 @@ async def run_invite_task(
                 added_count += 1
                 append_processed_user(target_user, processed_users)
                 await safe_report_user(report_user, target_user, "added", "успешно добавлен")
+
+                # App-like: после инвайта "юзер продолжает сидеть в Telegram"
+                if config.INVITE_APP_LIKE_ENABLED:
+                    asyncio.create_task(
+                        _app_session_post_invite(client, target_group, session_name)
+                    )
 
                 multiplier = worker.get("delay_multiplier", 1.0)
                 wait_seconds = int(random.randint(config.MIN_DELAY, config.MAX_DELAY) * multiplier)

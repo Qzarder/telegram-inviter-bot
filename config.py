@@ -98,6 +98,11 @@ INVITE_PAUSE_BETWEEN_MIN = _get_int("INVITE_PAUSE_BETWEEN_MIN", 30)   # deprecat
 INVITE_PAUSE_BETWEEN_MAX = _get_int("INVITE_PAUSE_BETWEEN_MAX", 180)   # deprecated
 INVITE_NATURAL_READING_ENABLED = _get_bool("INVITE_NATURAL_READING_ENABLED", True)
 INVITE_PRE_ENGAGE_ENABLED = _get_bool("INVITE_PRE_ENGAGE_ENABLED", True)
+# App-like behavior: имитация "юзер открыл приложение, пользуется им,
+# нажал Добавить участника". Снижает 'bot-score' Telegram.
+# - онлайн-статус, список диалогов, typing-индикатор
+# - после инвайта: чтение постов, переход в другой канал, offline
+INVITE_APP_LIKE_ENABLED = _get_bool("INVITE_APP_LIKE_ENABLED", True)
 INVITE_PRE_ENGAGE_MIN_TIME = _get_int("INVITE_PRE_ENGAGE_MIN_TIME", 180)
 INVITE_PRE_ENGAGE_MAX_TIME = _get_int("INVITE_PRE_ENGAGE_MAX_TIME", 600)
 INVITE_FIRST_DELAY_MIN = _get_int("INVITE_FIRST_DELAY_MIN", 60)
