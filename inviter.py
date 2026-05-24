@@ -1552,28 +1552,24 @@ async def run_invite_task(
                     circuit_breaker_triggers += 1
                 invite_attempt_done = True
                 break
-            except RPCError as exc:
-                # Серверные ошибки Telegram (-500 "No workers running", -503, 429 и т.п.):
-                # это не наша вина и не аккаунта, а сбой на стороне Telegram/прокси.
-                # Не баним акк, не палим cooldown — просто ждём 60-120 сек и продолжаем.
-                code = getattr(exc, "code", None) or getattr(exc, "rpc_code", None)
-                if isinstance(code, int) and code < 0 or (isinstance(code, int) and code in (429, 500, 502, 503, 504)):
-                    cooldown = random.uniform(60, 180)
-                    logger.warning(
-                        "[%s] Telegram server error %s: %s. Ждём %.0f сек и пробуем дальше.",
-                        session_name, code, short_error(exc), cooldown,
-                    )
-                    await safe_report_text(
-                        report_text,
-                        f"{session_name}: серверный сбой Telegram ({code}). Пауза {int(cooldown)} сек.",
-                    )
-                    await asyncio.sleep(cooldown)
-                    # Не инкрементируем user_idx — пробуем того же юзера снова
-                    invite_attempt_done = True
-                    break
-                # Не серверная RPCError → отдаём в общий except
-                raise
             except Exception as exc:
+                # Сначала проверка серверных ошибок Telegram (RPCError -500/-503/429 и т.п.)
+                if isinstance(exc, RPCError):
+                    code = getattr(exc, "code", None) or getattr(exc, "rpc_code", None)
+                    if isinstance(code, int) and (code < 0 or code in (429, 500, 502, 503, 504)):
+                        cooldown = random.uniform(60, 180)
+                        logger.warning(
+                            "[%s] Telegram server error %s: %s. Ждём %.0f сек и пробуем дальше.",
+                            session_name, code, short_error(exc), cooldown,
+                        )
+                        await safe_report_text(
+                            report_text,
+                            f"{session_name}: серверный сбой Telegram ({code}). Пауза {int(cooldown)} сек.",
+                        )
+                        await asyncio.sleep(cooldown)
+                        invite_attempt_done = True
+                        break
+                # Дальше — обычная обработка инвайт-ошибок:
                 error_text = str(exc).lower()
                 if config.USE_PROXY and is_proxy_related_error(error_text):
                     proxy_check_failed_count += 1
@@ -1625,9 +1621,8 @@ async def run_invite_task(
                         target_user=target_user,
                         limit_incident_times=limit_incident_times,
                         report_text=report_text,
-                        reason_label=short_error(exc,
-                    stop_event=stop_event,
-                ),
+                        reason_label=short_error(exc),
+                        stop_event=stop_event,
                     )
                     if len(limit_incident_times) >= config.INVITE_CIRCUIT_BREAKER_THRESHOLD:
                         circuit_breaker_triggers += 1
