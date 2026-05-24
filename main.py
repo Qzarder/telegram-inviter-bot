@@ -492,7 +492,11 @@ def _on_task_done(task: asyncio.Task) -> None:
 
     try:
         task.result()
-    except Exception:
+    except asyncio.CancelledError:
+        # Это нормальная остановка через Stop button (force-cancel).
+        # Не логируем как ошибку.
+        logger.info("Фоновая задача отменена пользователем")
+    except BaseException:
         logger.exception("Фоновая задача завершилась с ошибкой")
 
 
@@ -581,9 +585,20 @@ async def start_invite_job(chat_id: int, user_id: int, target_group: str) -> Non
                 report_user=report_user,
                 report_text=report_text,
             )
+        except asyncio.CancelledError:
+            # Stop button через force-cancel — нормальная остановка, не ошибка
+            logger.info("Задача инвайта прервана через Stop button")
+            try:
+                await report_text("⏹ Задача инвайта остановлена.")
+            except Exception:
+                pass
+            # НЕ re-raise — задача завершается чисто
         except Exception as exc:
             logger.exception("Ошибка выполнения задачи инвайта")
-            await report_text(f"Ошибка выполнения задачи инвайта: {exc}")
+            try:
+                await report_text(f"Ошибка выполнения задачи инвайта: {exc}")
+            except Exception:
+                pass
         finally:
             try:
                 await send_main_panel(job.chat_id)
