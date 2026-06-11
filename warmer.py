@@ -20,6 +20,7 @@ from telethon.tl.functions.photos import GetUserPhotosRequest, UploadProfilePhot
 from telethon.tl.types import InputPhoneContact, ReactionEmoji
 
 import config
+import session_meta
 import lolz_reauth
 
 logger = logging.getLogger("telegram_inviter_bot.warmer")
@@ -503,7 +504,10 @@ async def _sync_real_channel_state(
 # Расширенный warmer: реальные действия для роста Telegram-доверия
 # ============================================================
 
-_REACTION_EMOJI_POOL = ["👍", "❤️", "🔥", "🥰", "👏", "😁", "🎉", "🤔", "👌", "💯"]
+_REACTION_EMOJI_POOL = [
+    "👍", "👍", "👍", "❤️", "❤️", "🔥", "🔥", "🥰", "👏", "😁",
+    "🎉", "🤔", "👌", "💯", "😢", "👎", "🤯", "🙏", "😱",
+]
 _DM_MESSAGE_POOL_RU = [
     "привет", "как дела?", "норм", "ок", "ага", "понял", "ясно",
     "хорошо", "спасибо", "👍", "👌", "ок, до встречи", "пиши",
@@ -548,8 +552,9 @@ async def react_to_random_posts(
                 break
             if not msg or not getattr(msg, "id", 0):
                 continue
-            # 40% шанс поставить реакцию на каждый просматриваемый пост
-            if random.random() > 0.4:
+            # ~12% шанс реакции на пост — реальный юзер реагирует редко.
+            # 40% (как было) — явный бот-паттерн "лайкает почти всё".
+            if random.random() > 0.12:
                 continue
             try:
                 emoji = random.choice(_REACTION_EMOJI_POOL)
@@ -650,7 +655,7 @@ async def exchange_dm_with_peer(
     target_phone = None
     try:
         # Попытка через прямой connect к целевой сессии (быстро, без аутентификации)
-        target_client = TelegramClient(str(target_path), config.API_ID, config.API_HASH)
+        target_client = session_meta.build_client(target_path)
         await asyncio.wait_for(target_client.connect(), timeout=15)
         if await target_client.is_user_authorized():
             me = await target_client.get_me()
@@ -1631,7 +1636,10 @@ async def simulate_reading(client: TelegramClient, channel: str) -> tuple[bool, 
         return False, 0, _short_error(exc)
 
 
-REACTION_EMOJIS = ["👍", "❤️", "🔥", "👏", "😄", "🎉", "🤩", "👌", "💯", "✨"]
+REACTION_EMOJIS = [
+    "👍", "👍", "❤️", "❤️", "🔥", "👏", "😄", "🎉", "🤩", "👌",
+    "💯", "✨", "😢", "👎", "🤔", "🙏",
+]
 
 _PROFILE_BIOS = [
     "Just living my life 😊",
@@ -1772,15 +1780,16 @@ async def simulate_reading_with_reactions(client: TelegramClient, channel: str) 
             if message and getattr(message, "id", 0):
                 max_seen_id = max(max_seen_id, int(message.id))
                 seen_count += 1
-                if random.random() < 0.3:
+                if random.random() < 0.12:
                     messages_to_react.append(message.id)
             await _random_delay(2, 5)
 
-        if max_seen_id > 0:
+        # Не всегда дочитываем до самого конца и не всегда ack — как живой юзер
+        if max_seen_id > 0 and random.random() < 0.75:
             await client.send_read_acknowledge(channel, max_id=max_seen_id)
 
         if messages_to_react:
-            for msg_id in messages_to_react[:3]:
+            for msg_id in messages_to_react[:2]:
                 if await add_reaction_to_message(client, channel, msg_id):
                     reaction_count += 1
                 await _random_delay(1, 3)
@@ -1815,7 +1824,7 @@ async def fetch_identity_from_session(session_path: Path) -> tuple[Optional[tupl
 
     client: Optional[TelegramClient] = None
     try:
-        client = TelegramClient(str(session_path), config.API_ID, config.API_HASH, proxy=proxy)
+        client = session_meta.build_client(session_path, proxy=proxy)
         await client.connect()
         if not await client.is_user_authorized():
             return None, "соседний аккаунт не авторизован"
@@ -1979,7 +1988,7 @@ async def process_account_cycle(
         return True
 
     try:
-        client = TelegramClient(str(session_path), config.API_ID, config.API_HASH, proxy=proxy)
+        client = session_meta.build_client(session_path, proxy=proxy)
     except Exception as exc:
         entry["cycle_completed"] = False
         entry["last_status"] = "error"

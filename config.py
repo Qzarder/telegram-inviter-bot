@@ -157,7 +157,10 @@ WARMER_PROXY_WARMUP_MIN_ACTIONS = _get_int("WARMER_PROXY_WARMUP_MIN_ACTIONS", 5)
 # Включает DM-обмен между своими аккаунтами в warmer-цикле.
 # DM — самый сильный trust-сигнал для Telegram. Но если перебор —
 # можно попасть в "Spam" фильтр. Дефолт = on.
-WARMER_DM_ENABLED = _get_bool("WARMER_DM_ENABLED", True)
+# DM-обмен между СВОИМИ аккаунтами выключен по умолчанию: это создаёт
+# замкнутый граф (13 акков пишут только друг другу) = сигнатура ботофермы.
+# Включать только если есть внешние живые контакты для переписки.
+WARMER_DM_ENABLED = _get_bool("WARMER_DM_ENABLED", False)
 WARMER_PROFILE_SETUP_ENABLED = _get_bool("WARMER_PROFILE_SETUP_ENABLED", True)
 _profile_photos_raw = _get_str("WARMER_PROFILE_PHOTOS_DIR", "profile_photos")
 WARMER_PROFILE_PHOTOS_DIR = Path(_profile_photos_raw) if Path(_profile_photos_raw).is_absolute() else BASE_DIR / _profile_photos_raw

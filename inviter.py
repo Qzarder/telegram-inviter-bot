@@ -26,6 +26,7 @@ from telethon.tl.functions.channels import (
 from telethon.tl.types import InputUser
 
 import config
+import session_meta
 import warmer
 
 logger = logging.getLogger("telegram_inviter_bot.inviter")
@@ -82,22 +83,13 @@ async def _app_session_pre_invite(
     target_group: str,
     session_name: str,
 ) -> None:
-    """Имитация момента "юзер открыл группу и нажимает Добавить":
-    - typing-индикатор в группе (как будто что-то делает)
-    - короткая пауза (нажатие кнопок ассистента, ввод имени)
+    """Пауза "юзер открыл список участников, ввёл имя, выбрал, нажал Добавить".
+
+    Typing-индикатор УБРАН: добавление участника не печатает в чат,
+    SetTypingRequest был неестественным сигналом.
     """
     try:
-        from telethon.tl.functions.messages import SetTypingRequest
-        from telethon.tl.types import SendMessageTypingAction
-        try:
-            await client(SetTypingRequest(
-                peer=target_group,
-                action=SendMessageTypingAction(),
-            ))
-        except Exception:
-            pass
-        # "Юзер ввёл @username, выбрал из списка, нажал Добавить"
-        await asyncio.sleep(random.uniform(2, 6))
+        await asyncio.sleep(random.uniform(3, 9))
     except Exception as exc:
         logger.debug("app_session_pre_invite(%s): %s", session_name, short_error(exc))
 
@@ -842,7 +834,7 @@ async def validate_sessions(
                 cooldown_note = f" | отлежка:{format_duration(cooldown_left)}{reason_text}"
         client: Optional[TelegramClient] = None
         try:
-            client = TelegramClient(str(session_path), config.API_ID, config.API_HASH, proxy=proxy)
+            client = session_meta.build_client(session_path, proxy=proxy)
             await client.connect()
             if not await client.is_user_authorized():
                 noauth_count += 1
@@ -1083,7 +1075,7 @@ async def run_invite_task(
 
         client: Optional[TelegramClient] = None
         try:
-            client = TelegramClient(str(session_path), config.API_ID, config.API_HASH, proxy=proxy)
+            client = session_meta.build_client(session_path, proxy=proxy)
             await client.connect()
             if not await client.is_user_authorized():
                 logger.warning("Аккаунт %s не авторизован, пропускаю.", session_name)

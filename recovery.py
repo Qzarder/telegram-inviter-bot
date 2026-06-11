@@ -27,6 +27,7 @@ from telethon.errors import (
 )
 
 import config
+import session_meta
 import lolz_reauth
 
 logger = logging.getLogger("telegram_inviter_bot.recovery")
@@ -138,12 +139,9 @@ async def _check_session(session_path: Path) -> SessionStatus:
 
     client: Optional[TelegramClient] = None
     try:
-        client = TelegramClient(
-            str(session_path),
-            config.API_ID,
-            config.API_HASH,
-            # БЕЗ прокси — проверка реального статуса auth_key, а не сети
-        )
+        # БЕЗ прокси — проверка реального статуса auth_key, а не сети.
+        # build_client подставляет родной device-фингерпринт аккаунта.
+        client = session_meta.build_client(session_path)
         await asyncio.wait_for(client.connect(), timeout=30)
         if not await client.is_user_authorized():
             status.is_authorized = False
@@ -290,12 +288,8 @@ async def _recover_one(
 
     client: Optional[TelegramClient] = None
     try:
-        client = TelegramClient(
-            str(status.session_path),
-            config.API_ID,
-            config.API_HASH,
-            # БЕЗ прокси — recovery работает по прямому соединению
-        )
+        # БЕЗ прокси — recovery по прямому соединению, родной фингерпринт
+        client = session_meta.build_client(status.session_path)
         await asyncio.wait_for(client.connect(), timeout=30)
 
         # 3. Просим Telegram прислать код на этот номер

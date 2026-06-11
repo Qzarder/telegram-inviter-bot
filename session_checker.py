@@ -8,6 +8,7 @@ from typing import Optional
 from telethon import TelegramClient
 
 import config
+import session_meta
 
 logger = logging.getLogger("telegram_inviter_bot.session_checker")
 
@@ -101,7 +102,7 @@ async def check_session_health(
     session_name = get_session_relative_name(session_path)
     client: Optional[TelegramClient] = None
     try:
-        client = TelegramClient(str(session_path), config.API_ID, config.API_HASH, proxy=proxy)
+        client = session_meta.build_client(session_path, proxy=proxy)
         await client.connect()
         if not await client.is_user_authorized():
             return "unauthorized", "аккаунт не авторизован"

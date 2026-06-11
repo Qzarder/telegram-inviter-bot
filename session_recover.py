@@ -18,6 +18,7 @@ from telethon.crypto import AuthKey
 from telethon.sessions import SQLiteSession, StringSession
 
 import config
+import session_meta
 
 logger = logging.getLogger("telegram_inviter_bot.session_recover")
 logger.setLevel(logging.INFO)
@@ -186,7 +187,7 @@ async def validate_session_file(
 
     client: Optional[TelegramClient] = None
     try:
-        client = TelegramClient(str(session_path), config.API_ID, config.API_HASH, proxy=proxy)
+        client = session_meta.build_client(session_path, proxy=proxy)
         await client.connect()
         if not await client.is_user_authorized():
             return False, "не авторизован (слетел вход)"
