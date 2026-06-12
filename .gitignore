@@ -39,3 +39,6 @@ bot.log.*
 # OS
 .DS_Store
 Thumbs.db
+avatar_claims.json
+session_meta.json
+*.meta.json

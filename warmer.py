@@ -1687,6 +1687,59 @@ def _pick_bio_for_country(country: str) -> str:
     return random.choice(pool)
 
 
+_AVATAR_CLAIMS_FILE = config.BASE_DIR / "avatar_claims.json"
+
+
+def _account_skips_bio(session_name: str) -> bool:
+    """~35% акков детерминированно остаются без bio — как реальные люди."""
+    rng = random.Random(f"skipbio|{session_name.lower()}")
+    return rng.random() < 0.35
+
+
+def _claim_unused_avatar(photo_dir: Path, session_name: str) -> Optional[Path]:
+    """Закрепляет уникальное фото за аккаунтом (1 фото = 1 акк).
+
+    Хранит привязки в avatar_claims.json. Если у акка уже есть закреплённое
+    фото — возвращает его. Иначе берёт ещё не использованное. Если все заняты —
+    fallback на случайное (лучше повтор, чем без аватара).
+    """
+    photos = sorted(
+        f for f in photo_dir.iterdir()
+        if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") and f.is_file()
+    )
+    if not photos:
+        return None
+
+    claims: dict = {}
+    try:
+        if _AVATAR_CLAIMS_FILE.exists():
+            claims = json.loads(_AVATAR_CLAIMS_FILE.read_text(encoding="utf-8"))
+            if not isinstance(claims, dict):
+                claims = {}
+    except Exception:
+        claims = {}
+
+    # Уже закреплено?
+    existing = claims.get(session_name)
+    if existing:
+        p = photo_dir / existing
+        if p.exists():
+            return p
+
+    used = set(claims.values())
+    free = [p for p in photos if p.name not in used]
+    chosen = random.choice(free) if free else random.choice(photos)
+
+    claims[session_name] = chosen.name
+    try:
+        _AVATAR_CLAIMS_FILE.write_text(
+            json.dumps(claims, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+    return chosen
+
+
 async def setup_account_profile(
     client: TelegramClient,
     session_name: str,
@@ -1706,16 +1759,12 @@ async def setup_account_profile(
         if not me:
             return False, "не удалось получить профиль"
 
-        # --- Аватар ---
+        # --- Аватар (уникальный для каждого акка) ---
         if not getattr(me, "photo", None):
             photo_dir = config.WARMER_PROFILE_PHOTOS_DIR
             if photo_dir.is_dir():
-                photos = [
-                    f for f in photo_dir.iterdir()
-                    if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") and f.is_file()
-                ]
-                if photos:
-                    chosen = random.choice(photos)
+                chosen = _claim_unused_avatar(photo_dir, session_name)
+                if chosen is not None:
                     try:
                         uploaded = await client.upload_file(str(chosen))
                         await client(UploadProfilePhotoRequest(file=uploaded))
@@ -1725,14 +1774,14 @@ async def setup_account_profile(
                     except Exception as exc:
                         details.append(f"аватар: ошибка ({_short_error(exc)})")
                 else:
-                    details.append("аватар: нет фото в profile_photos/")
+                    details.append("аватар: нет свободных фото в profile_photos/")
             else:
                 details.append("аватар: папка profile_photos/ не найдена")
         else:
             details.append("аватар уже есть")
 
-        # --- Bio ---
-        if config.WARMER_PROFILE_BIO_ENABLED:
+        # --- Bio (часть акков намеренно без bio, как реальные люди) ---
+        if config.WARMER_PROFILE_BIO_ENABLED and not _account_skips_bio(session_name):
             current_bio = (getattr(me, "about", None) or "").strip()
             if not current_bio:
                 bio_text = _pick_bio_for_country(country)
@@ -1745,6 +1794,8 @@ async def setup_account_profile(
                     details.append(f"bio: ошибка ({_short_error(exc)})")
             else:
                 details.append("bio уже есть")
+        elif _account_skips_bio(session_name):
+            details.append("bio пропущен (акк без bio)")
 
     except Exception as exc:
         return False, f"ошибка настройки профиля: {_short_error(exc)}"

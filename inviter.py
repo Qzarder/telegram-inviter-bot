@@ -309,6 +309,24 @@ def _get_first_invite_delay(session_name: str) -> float:
     return rng.randint(config.INVITE_FIRST_DELAY_MIN, config.INVITE_FIRST_DELAY_MAX)
 
 
+def _human_invite_delay(base_min: int, base_max: int) -> float:
+    """Человеческая модель пауз между инвайтами вместо равномерной.
+
+    Реальный человек: иногда добавляет пару подряд (burst), обычно с нормальной
+    паузой, изредка надолго отвлекается. Равномерный random.randint выдаёт
+    «робота с метрономом» — статистически узнаваемо.
+    """
+    roll = random.random()
+    if roll < 0.25:
+        # Burst — добавил быстро (сидит и листает контакты)
+        return random.uniform(base_min * 0.4, base_min)
+    if roll < 0.85:
+        # Обычная пауза
+        return random.uniform(base_min, base_max)
+    # Отвлёкся надолго
+    return random.uniform(base_max, base_max * 2.5)
+
+
 # ============================================================
 # Privacy blacklist: юзеры с UserPrivacyRestricted сохраняются и
 # больше не пытаемся их инвайтить — сжигает дневной лимит впустую
@@ -1542,7 +1560,7 @@ async def run_invite_task(
                     )
 
                 multiplier = worker.get("delay_multiplier", 1.0)
-                wait_seconds = int(random.randint(config.MIN_DELAY, config.MAX_DELAY) * multiplier)
+                wait_seconds = int(_human_invite_delay(config.MIN_DELAY, config.MAX_DELAY) * multiplier)
                 worker["next_ready"] = loop.time() + wait_seconds
                 worker["last_natural_action"] = loop.time()
                 logger.info("[%s] Добавлен %s, пауза %s сек.", session_name, target_user, wait_seconds)
